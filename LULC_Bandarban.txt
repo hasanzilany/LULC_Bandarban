@@ -1,0 +1,468 @@
+Map.setCenter(92.2147, 22.1924, 7)
+//LANDSAT/LE07/C01/T1_RT      LANDSAT/LE07/C01/T1_SR   LANDSAT/LE07/C01/T1
+
+//BU calculation----------------------------------------------------------------
+/*For Landsat 7 data, NDVI = (Band 4 – Band 3) / (Band 4 + Band 3)
+For Landsat 8 data, NDVI = (Band 5 – Band 4) / (Band 5 + Band 4)
+For Landsat 7 data, NDBI = (Band 5 – Band 4) / (Band 5 + Band 4)
+For Landsat 8 data, NDBI = (Band 6 – Band 5) / (Band 6 + Band 5)
+BU = NDBI - NDVI*/
+function addBUL7(image) {
+  var ndvi = image.normalizedDifference(['B4', 'B3']).rename('NDBI');
+  var ndbi = image.normalizedDifference(['B5', 'B4']).rename('NDVI');
+  var bu = ndbi.subtract(ndvi).rename('BUL7');
+  return image.addBands(bu);
+}
+function addBUL8(image) {
+  var ndviL8 = image.normalizedDifference(['B5', 'B4']).rename('NDBI');
+  var ndbiL8 = image.normalizedDifference(['B6', 'B5']).rename('NDVI');
+  var buL8 = ndbiL8.subtract(ndviL8).rename('BUL8');
+  return image.addBands(buL8);
+}
+//BU calculation----------------------------------------------------------------
+
+
+
+var L7_ini =ee.ImageCollection('LANDSAT/LE07/C01/T1_RT')
+//var L7_ini = L7_f.filterBounds(bandarban_boundary)
+
+var L8_ini =ee.ImageCollection('LANDSAT/LC08/C01/T1_TOA')
+// Crop by table extension
+var table_bounds = function(L7_ini) {
+
+  return L7_ini.clip(bandarban_boundary);
+};
+
+var ClippedL7 = L7_ini.map(table_bounds);
+var ClippedL8 = L8_ini.map(table_bounds);
+
+
+
+var L7 = ClippedL7.filterDate('2010-01-01', '2013-12-31')
+                  .filterMetadata('CLOUD_COVER', 'less_than', 5)
+                  .filterMetadata('CLOUD_COVER_LAND', 'less_than', 5)
+                  .filterMetadata('IMAGE_QUALITY', 'equals', 9)
+                  
+                  .map(function(a){
+                    return a.set('year', ee.Image(a).date().get('year'))
+                  })
+                  
+var L8 = ClippedL8.filterDate('2014-01-01', '2020-12-31')
+                  .filterMetadata('CLOUD_COVER', 'less_than', 5)
+                  .filterMetadata('CLOUD_COVER_LAND', 'less_than', 5)
+                  //.filterMetadata('IMAGE_QUALITY', 'equals', 9)
+                  
+                  .map(function(a){
+                    return a.set('year', ee.Image(a).date().get('year'))
+                  })
+
+var visParams = {
+  bands: ['B3', 'B2', 'B1'],
+  min: 0,
+  max: 3000,
+  gamma: 1.4,
+};
+//test layer
+//Map.addLayer(L7.median().clip(bandarban_boundary), visParams);
+
+
+var list = ee.List([])
+
+for(var a=2010; a<2014; a++) {
+  
+  var filL7 = L7.filterMetadata('year', 'equals', a).median()
+  var L7final = filL7.set('year', a)
+                    .set('product', 'L7')
+        
+  list=list.add(L7final)
+}
+for(var b=2014; b<2021; b++) {
+  
+  var filL8 = L8.filterMetadata('year', 'equals', b).median()
+  var L8final = filL8.set('year', b)
+                    .set('product', 'L8')
+        
+  list=list.add(L8final)
+}
+//print(list)
+
+var finalCol = ee.ImageCollection(list).map(function(a){
+   return a.set('bands', ee.Image(a).bandNames().length())
+  
+})
+
+
+var year2010 = finalCol.filterMetadata('year', 'equals', 2010)
+var year_withBU2010 = year2010.map(addBUL7)
+var year2020 = finalCol.filterMetadata('year', 'equals', 2020)
+var year_withBU2020 = year2020.map(addBUL8)
+
+
+Map.addLayer(year_withBU2010,{bands: ['BUL7'], min: -0.3, max: 1, palette: ['FFFFFF', 'ff0000']},'Year'+'2010 ', false)
+Map.addLayer(year_withBU2020,{bands: ['BUL8'], min: -0.7, max: 1, palette: ['FFFFFF', 'ff0000']},'Year'+'2020 ', false)
+//Training Data-------------------------------------------------------
+//var y2020 = finalCol.filterDate('2010-01-01', '2020-12-31')
+//var filtered = y2020.clip(bandarban_boundary)
+
+//Merge sample points together into one FeatureCollection
+var urbanization_2020 = nonurban.merge(urban);
+
+//Select Bands from mosaic Image for training
+var bandsL7 = ['B1', 'B2', 'B3', "B4", 'B5', 'B7'];
+var bandsL8 = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B10', 'B11'];
+//The name of the property on the points storing the class lebel
+var classProperty = 'urbanization';
+
+//Sample the input imagery to get a FeatureCollection of training data
+var l8 = ee.ImageCollection('LANDSAT/LC08/C01/T1');
+
+var image120 = ee.Algorithms.Landsat.simpleComposite({
+  collection: l8.filterDate('2020-01-01', '2020-03-31'),
+  asFloat: true
+});
+var image220 = ee.Algorithms.Landsat.simpleComposite({
+  collection: l8.filterDate('2020-11-01', '2020-12-31'),
+  asFloat: true
+});
+var image2020 = ee.ImageCollection.fromImages([image120, image220]).mosaic();
+var training = image2020.select(bandsL8).sampleRegions({
+  collection: urbanization_2020,
+  properties: [classProperty],
+  scale: 30
+});
+
+//Train the classifier
+var classifier = ee.Classifier.cart().train({
+  features: training,
+  classProperty: classProperty,
+});
+
+//Classify the input imagery
+var classified_2020 = image2020.classify(classifier);
+
+//Define color palette
+var palette = [
+  '2d8018', 
+  'ff6218' 
+];
+
+//Display the classified result 
+Map.addLayer(classified_2020.clip(bandarban_boundary), {
+  min:0, max: 2, palette: palette}, 'LULC_2020', false);
+
+//Optinally, do some accuracy assessment. First, add a column of random uniforms to the training dataset.
+var withRandom = training.randomColumn('random');
+
+//We want to reserve some of the data for testing, to avoid overfitting the model.
+var split = 0.7; //Roughly 70% training, 30% testing.
+var trainingPartition = withRandom.filter(ee.Filter.lt('random', split));
+var testingPartition = withRandom.filter(ee.Filter.gte('random', split));
+
+//Trained with 70% of our data.
+var trainedClassifier = ee.Classifier.gmoMaxEnt().train({
+  features: trainingPartition,
+  classProperty: classProperty,
+  inputProperties: bandsL8
+});
+
+//classify the test FeatureCollection.
+var test = testingPartition.classify(trainedClassifier);
+
+//Print the Confusion Matrix.
+var confusionMatrix_2020 = test.errorMatrix(classProperty, 'classification');
+print('Confusion Matrix 2020', confusionMatrix_2020);
+print('Accuracy 2020', confusionMatrix_2020.accuracy());
+
+//Training Data-------------------------------------------------------
+
+//Sample the input imagery to get a FeatureCollection of training data
+var urbanization_2015 = nonurban.merge(urban);
+
+
+var image115 = ee.Algorithms.Landsat.simpleComposite({
+  collection: l8.filterDate('2016-01-01', '2016-03-31'),
+  asFloat: true
+});
+var image215 = ee.Algorithms.Landsat.simpleComposite({
+  collection: l8.filterDate('2016-11-01', '2016-12-31'),
+  asFloat: true
+});
+var image2015 = ee.ImageCollection.fromImages([image115, image215]).mosaic();
+
+
+ 
+var training = image2015.select(bandsL8).sampleRegions({
+  collection: urbanization_2015,
+  properties: [classProperty],
+  scale: 30
+});
+
+//Train the classifier
+var classifier = ee.Classifier.cart().train({
+  features: training,
+  classProperty: classProperty,
+});
+
+//Classify the input imagery
+var classified_2015 = image2015.classify(classifier);
+
+
+//Display the classified result 
+Map.addLayer(classified_2015.clip(bandarban_boundary), {
+  min:0, max: 2, palette: palette}, 'LULC_2015', false);
+
+//Optinally, do some accuracy assessment. First, add a column of random uniforms to the training dataset.
+var withRandom = training.randomColumn('random');
+
+//We want to reserve some of the data for testing, to avoid overfitting the model.
+var split = 0.7; //Roughly 70% training, 30% testing.
+var trainingPartition = withRandom.filter(ee.Filter.lt('random', split));
+var testingPartition = withRandom.filter(ee.Filter.gte('random', split));
+
+//Trained with 70% of our data.
+var trainedClassifier = ee.Classifier.gmoMaxEnt().train({
+  features: trainingPartition,
+  classProperty: classProperty,
+  inputProperties: bandsL8
+});
+
+//classify the test FeatureCollection.
+var test_2015 = testingPartition.classify(trainedClassifier);
+
+//Print the Confusion Matrix.
+var confusionMatrix_2015 = test_2015.errorMatrix(classProperty, 'classification');
+print('Confusion Matrix 2015', confusionMatrix_2015);
+print('Accuracy 2015', confusionMatrix_2015.accuracy());
+
+//2010 training--------------------------------------------
+//LANDSAT/LE07/C01/T1_RT      LANDSAT/LE07/C01/T1_SR   LANDSAT/LE07/C01/T1   LANDSAT/LE07/C01/T2_TOA
+var urbanization_2010 = nonurban.merge(urban);
+var l7 = ee.ImageCollection('LANDSAT/LE07/C01/T1_RT');
+
+var image1 = ee.Algorithms.Landsat.simpleComposite({
+  collection: l7.filterDate('2010-01-01', '2010-03-30'),
+  asFloat: true
+});
+var image2 = ee.Algorithms.Landsat.simpleComposite({
+  collection: l7.filterDate('2010-10-01', '2010-12-31'),
+  asFloat: true
+});
+var image10 = ee.ImageCollection.fromImages([image1, image2]).mosaic();
+
+/*var image10 = ee.Algorithms.Landsat.simpleComposite({
+  collection: l7.filterDate('2010-01-01', '2010-12-31'),
+  asFloat: true
+});*/
+var training = image10.select(bandsL7).sampleRegions({
+  collection: urbanization_2010,
+  properties: [classProperty],
+  scale: 30
+});
+
+//Train the classifier
+var classifier = ee.Classifier.cart().train({
+  features: training,
+  classProperty: classProperty,
+});
+
+//Classify the input imagery
+var classified_2010 = image10.classify(classifier);
+
+
+//Display the classified result 
+Map.addLayer(classified_2010.clip(bandarban_boundary), {
+  min:0, max: 2, palette: palette}, 'LULC_2010', false);
+
+//Accuracy assessment. First, add a column of random uniforms to the training dataset.
+var withRandom = training.randomColumn('random');
+
+//We want to reserve some of the data for testing, to avoid overfitting the model.
+var split = 0.7; //Roughly 70% training, 30% testing.
+var trainingPartition = withRandom.filter(ee.Filter.lt('random', split));
+var testingPartition = withRandom.filter(ee.Filter.gte('random', split));
+
+//Trained with 70% of our data.
+var trainedClassifier = ee.Classifier.gmoMaxEnt().train({
+  features: trainingPartition,
+  classProperty: classProperty,
+  inputProperties: bandsL7
+});
+
+//classify the test FeatureCollection.
+var test = testingPartition.classify(trainedClassifier);
+
+//Print the Confusion Matrix.
+var confusionMatrix_2010 = test.errorMatrix(classProperty, 'classification');
+print('Confusion Matrix 2010', confusionMatrix_2010);
+print('Accuracy 2010', confusionMatrix_2010.accuracy());
+//------------------------------------------------------------------------------------------------
+
+
+
+//district boundaries
+var districts = ee.FeatureCollection("FAO/GAUL/2015/level2")
+Map.addLayer(districts, {},"District boundaries", false);
+
+//Change detection------------------------------------------------------------------------------
+//Determine the Land Cover Change between 2015 and 2020
+var LULC_Change1 = classified_2020.subtract(classified_2015);
+Map.addLayer(LULC_Change1.clip(bandarban_boundary), {
+  min:0, max:2, palette: ['green', 'red', 'yellow']}, 'LULC Change Between 2015 and 2020_Bandarban');
+
+//Determine the Land Cover Change between 2010 and 2015
+var LULC_Change2 = classified_2015.subtract(classified_2010);
+Map.addLayer(LULC_Change2.clip(bandarban_boundary), {
+  min:0, max:2, palette: ['green', 'red', 'yellow']}, 'LULC Change Between 2010 and 2015_Bandarban');
+
+//Determine the Land Cover Change between 2010 and 2020
+var LULC_Change3 = classified_2020.subtract(classified_2010);
+Map.addLayer(LULC_Change3.clip(bandarban_boundary), {
+  min:0, max:2, palette: ['green', 'red', 'yellow']}, 'LULC Change Between 2010 and 2020_Bandarban');
+
+//------------------------------------------------------------------------------
+
+//Chart-----------------------------------------------------------------------------
+ 
+
+
+// Map a function over the Landsat 8 TOA collection to add an NDVI band.
+/*var withNDVI = ClippedL8.map(function(image) {
+  var ndvi = image.normalizedDifference(['B5', 'B4']).rename('NDVI');
+  return image.addBands(ndvi);
+});
+var chart = ui.Chart.image.series({
+  imageCollection: withNDVI.select('NDVI'),
+  region: bandarban_boundary,
+  reducer: ee.Reducer.first(),
+  scale: 30
+}).setOptions({title: 'NDVI over time', hAxis: {title:'Year'}});
+
+// Display the chart in the console.
+print(chart);*/
+/*var withNDBI = ClippedL8.map(function(image) {
+  var ndbi = image.normalizedDifference(['B6', 'B5']).rename('NDBI');
+  return image.addBands(ndbi);
+});
+var chart2 = ui.Chart.image.series({
+  imageCollection: withNDBI.select('NDBI'),
+  region: bandarban_boundary,
+  reducer: ee.Reducer.first(),
+  scale: 30
+}).setOptions({title: 'NDBI over time', hAxis: {title:'Year'}});
+// Display the chart in the console.
+print(chart2);*/
+
+/*var withBU = ClippedL8.map(function(image) {
+   var ndviL8 = image.normalizedDifference(['B5', 'B4']).rename('NDBI');
+  var ndbiL8 = image.normalizedDifference(['B6', 'B5']).rename('NDVI');
+  var buL8 = ndbiL8.subtract(ndviL8).rename('BU');
+  return image.addBands(buL8);
+});
+var chart3 = ui.Chart.image.series({
+  imageCollection: withBU.select('BU'),
+  region: bandarban_boundary,
+  reducer: ee.Reducer.first(),
+  scale: 30
+}).setOptions({title: 'BU over time', hAxis: {title:'Year'}});
+// Display the chart in the console.
+print(chart3)*/
+
+
+
+/*Export.image.toDrive({
+  image: LULC_Change1.clip(bandarban_boundary).toDouble(),
+  description: 'LULC_Change_Between_2015_and_2020_Bandarban',
+  scale: 30,
+  region: bandarban_boundary,
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e9
+});*/
+
+
+/*//thumbnails--------------------------------------------------------------
+
+//LULC Change Between 2020 and 2015_Bandarban
+var thumbnail1 = LULC_Change1.clip(bandarban_boundary).getThumbURL({
+  'min': 0,
+  'max': 2,
+  'palette':  ['green', 'red', 'yellow'],
+  'dimensions': 500,
+  'region': bandarban_boundary,
+});
+print('LULC Change Between 2020 and 2015_Bandarban:', thumbnail1);
+
+//LULC Change Between 2010 and 2015_Bandarban
+var thumbnail2 = LULC_Change2.clip(bandarban_boundary).getThumbURL({
+  'min': 0,
+  'max': 2,
+  'palette':  ['green', 'red', 'yellow'],
+  'dimensions': 500,
+  'region': bandarban_boundary,
+});
+print('LULC Change Between 2010 and 2015_Bandarban:', thumbnail2);
+
+//LULC Change Between 2010 and 2020_Bandarban
+var thumbnail3 = LULC_Change3.clip(bandarban_boundary).getThumbURL({
+  'min': 0,
+  'max': 2,
+  'palette':  ['green', 'red', 'yellow'],
+  'dimensions': 500,
+  'region': bandarban_boundary,
+});
+print('LULC Change Between 2010 and 2020_Bandarban:', thumbnail3);
+
+
+var thumbnail4 = classified_2020.clip(bandarban_boundary).getThumbURL({
+  'min': 0,
+  'max': 2,
+  'palette':  palette,
+  'dimensions': 500,
+  'region': bandarban_boundary,
+});
+print('classified_2020', thumbnail4);
+
+var thumbnail4 = classified_2015.clip(bandarban_boundary).getThumbURL({
+  'min': 0,
+  'max': 2,
+  'palette':  palette,
+  'dimensions': 500,
+  'region': bandarban_boundary,
+});
+print('classified_2015', thumbnail4);
+
+var thumbnail4 = classified_2010.clip(bandarban_boundary).getThumbURL({
+  'min': 0,
+  'max': 2,
+  'palette': palette,
+  'dimensions': 500,
+  'region': bandarban_boundary,
+});
+print('classified_2010', thumbnail4);
+*/
+var bui = classified_2020.select('classification').eq(1);
+var bu_area = bui.multiply(ee.Image.pixelArea()).divide(1000*1000);
+
+var stat = bu_area.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: bandarban_boundary,
+  scale: 30,
+  maxPixels: 1e9
+});
+
+print('Built-up area 2020 (in sq.km)', stat);
+
+ 
+
+var bui1 = classified_2010.select('classification').eq(1);
+var bu_area1 = bui1.multiply(ee.Image.pixelArea()).divide(1000*1000);
+
+var stat1 = bu_area1.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: bandarban_boundary,
+  scale: 30,
+  maxPixels: 1e9
+});
+
+print('Built-up area 2010 (in sq.km)', stat1);
+
+ 
